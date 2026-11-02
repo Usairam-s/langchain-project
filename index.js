@@ -244,6 +244,47 @@ const listPipelineStages = tool(
   },
 );
 
+async function fetchAllMatchingOpportunities(filters, locationId, apiKey) {
+  const url = "https://services.leadconnectorhq.com/opportunities/search";
+  const headers = {
+    Authorization: `Bearer ${apiKey}`,
+    Version: "v3",
+    "Content-Type": "application/json",
+  };
+
+  let allOpportunities = [];
+  let page = 0;
+  let total = 0;
+  const MAX_PAGES = 10;
+
+  while (page < MAX_PAGES) {
+    const body = {
+      locationId,
+      limit: 500,
+      page,
+      filters,
+    };
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+
+    const data = await response.json();
+    total = data.total || 0;
+    const pageResults = data.opportunities || [];
+    allOpportunities = allOpportunities.concat(pageResults);
+
+    if (allOpportunities.length >= total || pageResults.length === 0) {
+      break;
+    }
+    page++;
+  }
+
+  return { opportunities: allOpportunities, total };
+}
+
 /**
  * Finds leads stuck in a specific pipeline stage (defaults to "New Lead") for a given number of days.
  */
@@ -284,47 +325,20 @@ const findStaleOpportunities = tool(
         return `No stage exactly matching '${stageName}' was found. Here are the actual available pipelines and stages:\n\n${availableStagesText}\n\nPlease specify one of these exact stage names.`;
       }
 
-      const url = "https://services.leadconnectorhq.com/opportunities/search";
-      const headers = {
-        Authorization: `Bearer ${apiKey}`,
-        Version: "v3",
-        "Content-Type": "application/json",
-      };
-
-      const body = {
-        locationId,
-        limit: 50,
-        page: 0,
-        filters: [
-          {
-            field: "status",
+      const filters = [
+        { field: "status", operator: "eq", value: "open" },
+        { field: "last_stage_change_date", operator: "range", value: { lt: cutoffDate } },
+        {
+          group: "OR",
+          filters: newLeadStageIds.map((stageId) => ({
+            field: "pipeline_stage_id",
             operator: "eq",
-            value: "open",
-          },
-          {
-            field: "last_stage_change_date",
-            operator: "range",
-            value: { lt: cutoffDate },
-          },
-          {
-            group: "OR",
-            filters: newLeadStageIds.map((stageId) => ({
-              field: "pipeline_stage_id",
-              operator: "eq",
-              value: stageId,
-            })),
-          },
-        ],
-      };
+            value: stageId,
+          })),
+        },
+      ];
 
-      const response = await fetch(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-      });
-
-      const data = await response.json();
-      const opportunities = data.opportunities || [];
+      const { opportunities, total } = await fetchAllMatchingOpportunities(filters, locationId, apiKey);
 
       if (opportunities.length === 0) {
         return "No stale opportunities found — all active leads have had recent activity.";
@@ -337,7 +351,8 @@ const findStaleOpportunities = tool(
         return isoString.slice(0, 10);
       };
 
-      const formattedList = opportunities
+      const displayList = opportunities.slice(0, 20);
+      const formattedList = displayList
         .map((opportunity, index) => {
           const contactName = opportunity.contact?.name || "Unknown";
           const opportunityName = opportunity.name || "Unnamed";
@@ -358,7 +373,7 @@ const findStaleOpportunities = tool(
         ? ` within pipeline '${pipelineName}'`
         : "";
 
-      return `${formattedList}\nFound ${opportunities.length} opportunity(ies) stuck in '${stageName}'${scopeText} for ${daysThreshold}+ days.`;
+      return `${formattedList}\nFound ${total} opportunity(ies) stuck in '${stageName}'${scopeText} for ${daysThreshold}+ days.${total > 20 ? ` Showing the first 20 — narrow your search (specific pipeline, fewer days) to see a more focused list.` : ""}`;
     } catch (error) {
       return `Error finding stale opportunities: ${error.message}`;
     }
@@ -490,7 +505,11 @@ app.post("/agent/chat", async (req, res) => {
   }
 });
 
-const PORT = 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-});
+if (process.env.NODE_ENV !== "production") {
+  const PORT = 3000;
+  app.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+}
+
+export default app;

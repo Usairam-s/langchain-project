@@ -199,7 +199,8 @@
     </div>
 
     <script>
-      const API_URL = "http://localhost:3000/agent/chat";
+      // const API_URL = "http://localhost:3000/agent/chat";
+      const API_URL = "https://aiintelligentleadagent.vercel.app/agent/chat";
       let conversationHistory = [];
 
       const chatArea = document.getElementById("chatArea");
@@ -224,7 +225,10 @@
           .replace(/</g, "&lt;")
           .replace(/>/g, "&gt;");
 
-        const withBold = escaped.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+        const withBold = escaped.replace(
+          /\*\*(.+?)\*\*/g,
+          "<strong>$1</strong>",
+        );
 
         const lines = withBold.split("\n");
         let html = "";
@@ -302,7 +306,10 @@
 
           const data = await response.json();
           conversationHistory.push({ role: "user", content: message });
-          conversationHistory.push({ role: "assistant", content: data.response });
+          conversationHistory.push({
+            role: "assistant",
+            content: data.response,
+          });
           thinkingBubble.remove();
           appendBubble(formatAgentText(data.response), "agent", true);
         } catch (error) {
