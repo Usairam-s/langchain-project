@@ -42,6 +42,32 @@
         flex-shrink: 0;
       }
 
+      .header-content {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+
+      .reset-btn {
+        background: #f1f3f5;
+        border: 1px solid #d1d5db;
+        color: #4b5563;
+        padding: 6px 12px;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        transition: all 0.15s ease;
+      }
+
+      .reset-btn:hover {
+        background: #e5e7eb;
+        color: #111827;
+      }
+
       header h1 {
         font-size: 20px;
         font-weight: 700;
@@ -183,8 +209,15 @@
   <body>
     <div class="container">
       <header>
-        <h1>Lead Intelligence Agent</h1>
-        <p>Ask about leads, opportunities, and pipeline status</p>
+        <div class="header-content">
+          <div>
+            <h1>Lead Intelligence Agent</h1>
+            <p>Ask about leads, opportunities, and pipeline status</p>
+          </div>
+          <button id="resetButton" class="reset-btn" title="Start over fresh">
+            🔄 Start Over
+          </button>
+        </div>
       </header>
       <div class="chat-area" id="chatArea"></div>
       <div class="footer">
@@ -199,13 +232,21 @@
     </div>
 
     <script>
-      // const API_URL = "http://localhost:3000/agent/chat";
-      const API_URL = "https://aiintelligentleadagent.vercel.app/agent/chat";
+      const API_URL = "http://localhost:3000/agent/chat";
+      // const API_URL = "https://aiintelligentleadagent.vercel.app/agent/chat";
       let conversationHistory = [];
 
       const chatArea = document.getElementById("chatArea");
       const messageInput = document.getElementById("messageInput");
       const sendButton = document.getElementById("sendButton");
+      const resetButton = document.getElementById("resetButton");
+
+      resetButton.addEventListener("click", () => {
+        conversationHistory = [];
+        chatArea.innerHTML = "";
+        messageInput.value = "";
+        messageInput.focus();
+      });
 
       messageInput.addEventListener("keydown", (event) => {
         if (event.key === "Enter") {
@@ -236,7 +277,7 @@
 
         for (const line of lines) {
           const numberedMatch = line.match(/^\s*\d+\.\s+(.*)/);
-          const subBulletMatch = line.match(/^\s*-\s+(.*)/);
+          const subBulletMatch = line.match(/^\s*[-•*]\s+(.*)/);
           const isBlank = line.trim() === "";
 
           if (numberedMatch) {
@@ -249,7 +290,9 @@
             }
             html += `<li>${numberedMatch[1]}`;
           } else if (subBulletMatch && inList) {
-            html += `<br>&nbsp;&nbsp;${subBulletMatch[1]}`;
+            html += `<br>&nbsp;&nbsp;•&nbsp;${subBulletMatch[1]}`;
+          } else if (subBulletMatch && !inList) {
+            html += `<div>•&nbsp;${subBulletMatch[1]}</div>`;
           } else if (isBlank) {
             continue;
           } else {

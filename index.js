@@ -11,7 +11,6 @@ import cors from "cors";
  */
 const searchContacts = tool(
   async ({ name }) => {
-    const lowercasedName = name.toLowerCase();
     const url = "https://services.leadconnectorhq.com/contacts/search";
     const apiKey = process.env.GHL_API_KEY;
     const locationId = process.env.GHL_LOCATION_ID;
@@ -25,13 +24,7 @@ const searchContacts = tool(
     const body = {
       locationId,
       pageLimit: 20,
-      filters: [
-        {
-          field: "firstNameLowerCase",
-          operator: "contains",
-          value: lowercasedName,
-        },
-      ],
+      query: name,
     };
 
     try {
@@ -68,11 +61,13 @@ const searchContacts = tool(
   {
     name: "searchContacts",
     description:
-      "Search for GoHighLevel contacts by name. Returns matching contacts with their IDs.",
+      "Search for GoHighLevel contacts by name, email, or phone. Searches across all searchable fields.",
     schema: z.object({
       name: z
         .string()
-        .describe("The contact's first or last name to search for."),
+        .describe(
+          "Any search term — first name, last name, full name, email, or phone number.",
+        ),
     }),
   },
 );
@@ -163,6 +158,9 @@ const getOpportunityStatus = tool(
 
       const formatOpportunity = (opportunity) => {
         const contactName = opportunity.contact?.name || "Unknown";
+        const contactPhone = opportunity.contact?.phone
+          ? ` (phone: ${opportunity.contact.phone})`
+          : "";
         const opportunityName = opportunity.name || "Unnamed";
         const pipelineName =
           pipelines[opportunity.pipelineId] ||
@@ -172,7 +170,10 @@ const getOpportunityStatus = tool(
           stages[opportunity.pipelineStageId] ||
           opportunity.pipelineStageId ||
           "Unknown";
-        return `${contactName}'s opportunity '${opportunityName}' is in pipeline '${pipelineName}', stage '${stageName}', status: ${opportunity.status}.`;
+        const valueStr = opportunity.monetaryValue
+          ? ` with value $${opportunity.monetaryValue}`
+          : "";
+        return `${contactName}${contactPhone}'s opportunity '${opportunityName}' is in pipeline '${pipelineName}', stage '${stageName}', status: ${opportunity.status}${valueStr}.`;
       };
 
       if (opportunities.length === 1) {
@@ -244,11 +245,223 @@ const listPipelineStages = tool(
   },
 );
 
+/**
+ * Retrieves opportunity statistics and stage counts for pipelines in GHL.
+ */
+const getPipelineStats = tool(
+  async ({ pipelineName, status = "open" }) => {
+    const apiKey = process.env.GHL_API_KEY;
+    const locationId = process.env.GHL_LOCATION_ID;
+
+    try {
+      const url = `https://services.leadconnectorhq.com/opportunities/pipelines?locationId=${locationId}`;
+      const headers = {
+        Authorization: `Bearer ${apiKey}`,
+        Version: "2021-07-28",
+        "Content-Type": "application/json",
+      };
+
+      const response = await fetch(url, { method: "GET", headers });
+      const data = await response.json();
+      const pipelinesList = data.pipelines || [];
+
+      if (pipelinesList.length === 0) {
+        return "No pipelines found in this GoHighLevel account.";
+      }
+
+      const statusFilterObj =
+        status && status !== "all"
+          ? [{ field: "status", operator: "eq", value: status }]
+          : [];
+
+      // If a specific pipeline was requested
+      if (pipelineName) {
+        const query = pipelineName.toLowerCase().trim();
+        const matchedPipeline =
+          pipelinesList.find((p) => p.name.toLowerCase() === query) ||
+          pipelinesList.find((p) => p.name.toLowerCase().includes(query));
+
+        if (!matchedPipeline) {
+          const available = pipelinesList.map((p) => p.name).join(", ");
+          return `Pipeline '${pipelineName}' not found. Available pipelines: ${available}`;
+        }
+
+        // Fetch counts for all stages in parallel
+        const stages = matchedPipeline.stages || [];
+        const stageCounts = await Promise.all(
+          stages.map(async (stage) => {
+            const filters = [
+              {
+                field: "pipeline_stage_id",
+                operator: "eq",
+                value: stage.id,
+              },
+              ...statusFilterObj,
+            ];
+            const searchRes = await fetch(
+              "https://services.leadconnectorhq.com/opportunities/search",
+              {
+                method: "POST",
+                headers,
+                body: JSON.stringify({
+                  locationId,
+                  limit: 1,
+                  page: 0,
+                  filters,
+                }),
+              },
+            );
+            const searchData = await searchRes.json();
+            return {
+              name: stage.name,
+              count: searchData.total || 0,
+            };
+          }),
+        );
+
+        const totalInPipeline = stageCounts.reduce(
+          (sum, s) => sum + s.count,
+          0,
+        );
+        const breakdown = stageCounts
+          .map(
+            (s, i) =>
+              `${i + 1}. ${s.name}: ${s.count} ${status === "all" ? "total" : status} opportunity(ies)`,
+          )
+          .join("\n");
+
+        return `Pipeline: '${matchedPipeline.name}' (${status === "all" ? "Total" : "Open"} Opportunities: ${totalInPipeline})\n\nStage Breakdown:\n${breakdown}`;
+      }
+
+      // If no specific pipeline requested, summarize all pipelines with their opportunity counts
+      const pipelineSummaries = await Promise.all(
+        pipelinesList.map(async (pipeline) => {
+          const filters = [
+            {
+              field: "pipeline_id",
+              operator: "eq",
+              value: pipeline.id,
+            },
+            ...statusFilterObj,
+          ];
+          const searchRes = await fetch(
+            "https://services.leadconnectorhq.com/opportunities/search",
+            {
+              method: "POST",
+              headers,
+              body: JSON.stringify({
+                locationId,
+                limit: 1,
+                page: 0,
+                filters,
+              }),
+            },
+          );
+          const searchData = await searchRes.json();
+          const stagesNames = (pipeline.stages || [])
+            .map((s) => s.name)
+            .join(", ");
+          return `${pipeline.name}: ${searchData.total || 0} ${status === "all" ? "total" : "open"} opportunities across ${pipeline.stages?.length || 0} stages (${stagesNames})`;
+        }),
+      );
+
+      const statusNote = status === "all" ? "all (including won/lost)" : "open";
+      return `Found ${pipelinesList.length} pipeline(s) in GoHighLevel (${statusNote} opportunities):\n\n${pipelineSummaries.map((line, idx) => `${idx + 1}. ${line}`).join("\n")}\n\nTip: You can ask for a stage breakdown for any specific pipeline (e.g. "How many opportunities are in each stage of General Sales Pipeline?").`;
+    } catch (error) {
+      return `Error retrieving pipeline stats: ${error.message}`;
+    }
+  },
+  {
+    name: "getPipelineStats",
+    description:
+      "Get opportunity counts and statistics for GoHighLevel pipelines and their stages. Defaults to active 'open' opportunities (matching the GoHighLevel UI pipeline dashboard), or can filter by 'won', 'lost', or 'all'. Can summarize all pipelines or provide a detailed stage-by-stage breakdown for a specific pipeline name.",
+    schema: z.object({
+      pipelineName: z
+        .string()
+        .optional()
+        .describe(
+          "Optional: The name of a specific pipeline to get a stage-by-stage opportunity breakdown for. If omitted, returns counts for each pipeline.",
+        ),
+      status: z
+        .enum(["open", "won", "lost", "abandoned", "all"])
+        .default("open")
+        .describe(
+          "Filter by opportunity status: 'open' (default, matches GoHighLevel UI dashboard), 'won', 'lost', 'abandoned', or 'all'.",
+        ),
+    }),
+  },
+);
+
+/**
+ * Searches GoHighLevel opportunities by name and returns formatted results.
+ */
+const searchOpportunities = tool(
+  async ({ opportunityName }) => {
+    const apiKey = process.env.GHL_API_KEY;
+    const locationId = process.env.GHL_LOCATION_ID;
+
+    try {
+      const { pipelines, stages } = await getPipelinesMap();
+
+      const url = `https://services.leadconnectorhq.com/opportunities/search?locationId=${locationId}&q=${encodeURIComponent(opportunityName)}&limit=20`;
+      const headers = {
+        Authorization: `Bearer ${apiKey}`,
+        Version: "2021-07-28",
+        "Content-Type": "application/json",
+      };
+
+      const response = await fetch(url, { method: "GET", headers });
+      const data = await response.json();
+      const opportunities = data.opportunities || [];
+
+      if (opportunities.length === 0) {
+        return "No opportunities found matching that name.";
+      }
+
+      const formattedList = opportunities
+        .map((opportunity, index) => {
+          const contactName = opportunity.contact?.name || "Unknown";
+          const contactPhone = opportunity.contact?.phone || "N/A";
+          const contactEmail = opportunity.contact?.email
+            ? ` | ${opportunity.contact.email}`
+            : "";
+          const pipelineLabel =
+            pipelines[opportunity.pipelineId] ||
+            opportunity.pipelineId ||
+            "Unknown";
+          const stageLabel =
+            stages[opportunity.pipelineStageId] ||
+            opportunity.pipelineStageId ||
+            "Unknown";
+          const valueStr = opportunity.monetaryValue
+            ? ` — Value: $${opportunity.monetaryValue}`
+            : "";
+          return `${index + 1}) ${opportunity.name} — Contact: ${contactName} (phone: ${contactPhone}${contactEmail}) — Pipeline: ${pipelineLabel} — Stage: ${stageLabel} — Status: ${opportunity.status}${valueStr}`;
+        })
+        .join("\n");
+
+      return formattedList;
+    } catch (error) {
+      return `Error searching opportunities: ${error.message}`;
+    }
+  },
+  {
+    name: "searchOpportunities",
+    description:
+      "Search for GoHighLevel opportunities by name. Returns matching opportunities with their pipeline, stage, contact, phone number, and status.",
+    schema: z.object({
+      opportunityName: z
+        .string()
+        .describe("The opportunity name to search for (max 75 characters)."),
+    }),
+  },
+);
+
 async function fetchAllMatchingOpportunities(filters, locationId, apiKey) {
   const url = "https://services.leadconnectorhq.com/opportunities/search";
   const headers = {
     Authorization: `Bearer ${apiKey}`,
-    Version: "v3",
+    Version: "2021-07-28",
     "Content-Type": "application/json",
   };
 
@@ -355,6 +568,10 @@ const findStaleOpportunities = tool(
       const formattedList = displayList
         .map((opportunity, index) => {
           const contactName = opportunity.contact?.name || "Unknown";
+          const contactPhone = opportunity.contact?.phone || "N/A";
+          const contactEmail = opportunity.contact?.email
+            ? ` | ${opportunity.contact.email}`
+            : "";
           const opportunityName = opportunity.name || "Unnamed";
           const pipelineLabel =
             pipelines[opportunity.pipelineId] ||
@@ -365,7 +582,10 @@ const findStaleOpportunities = tool(
             opportunity.pipelineStageId ||
             "Unknown";
           const lastMoved = formatDate(opportunity.lastStageChangeAt);
-          return `${index + 1}) ${contactName} — '${opportunityName}' — pipeline: ${pipelineLabel}, stage: ${stageLabel} — last moved: ${lastMoved}`;
+          const valueStr = opportunity.monetaryValue
+            ? ` — Value: $${opportunity.monetaryValue}`
+            : "";
+          return `${index + 1}) ${contactName} (phone: ${contactPhone}${contactEmail}) — '${opportunityName}' — Pipeline: ${pipelineLabel}, Stage: ${stageLabel} — Last moved: ${lastMoved}${valueStr}`;
         })
         .join("\n");
 
@@ -409,16 +629,22 @@ const tools = [
   searchContacts,
   getOpportunityStatus,
   listPipelineStages,
+  getPipelineStats,
   findStaleOpportunities,
+  searchOpportunities,
 ];
 
 const toolsByName = Object.fromEntries(tools.map((t) => [t.name, t]));
 
-const SYSTEM_PROMPT = `You are a helpful CRM assistant for a GoHighLevel account with multiple pipelines. Follow these rules:
+const SYSTEM_PROMPT = `You are an intelligent CRM Copilot for a GoHighLevel account. Follow these guidelines:
 
-1. PIPELINE AMBIGUITY: When a user asks about leads/opportunities in a specific stage (e.g. "New Lead") without naming a pipeline, and that stage name exists in MORE THAN ONE pipeline, do not just search all pipelines silently. Instead, first call findStaleOpportunities WITHOUT specifying a pipeline to see the results. If the results span multiple different pipelines, mention this clearly to the user and ask if they want to narrow it to one specific pipeline, unless they've already indicated they want results across all pipelines.
+1. PIPELINE & STAGE STATS: When the user asks how many pipelines or opportunities exist, or how many opportunities are in each stage or pipeline, use the 'getPipelineStats' tool. By default, GoHighLevel's pipeline UI dashboard displays 'open' opportunities, so leave status as 'open' (default) unless the user specifically asks for won, lost, abandoned, or all. If they ask about a specific pipeline, pass its name.
 
-2. FORMATTING: When listing multiple items (contacts, opportunities, pipeline stages), always format them as a numbered markdown list, like:
+2. PIPELINE AMBIGUITY: When a user asks about leads/opportunities in a specific stage (e.g. "New Lead") without naming a pipeline, and that stage name exists in MORE THAN ONE pipeline, do not just search all pipelines silently. Instead, first call findStaleOpportunities WITHOUT specifying a pipeline to see the results. If the results span multiple different pipelines, mention this clearly to the user and ask if they want to narrow it to one specific pipeline, unless they've already indicated they want results across all pipelines.
+
+3. CONTACT DETAILS & PHONE NUMBERS: Whenever presenting opportunities or contacts, always include contact phone numbers and emails if available so the user/sales team can take immediate action.
+
+4. FORMATTING: When listing multiple items (contacts, opportunities, pipeline stages, stats), always format them as a numbered markdown list, like:
 1. Item one
    - detail
    - detail
@@ -427,7 +653,7 @@ const SYSTEM_PROMPT = `You are a helpful CRM assistant for a GoHighLevel account
 
 Always use actual numbers (1., 2., 3.) for lists, never bullet points alone, when listing 2 or more items.
 
-3. CLARITY: Keep responses concise and conversational. Don't repeat raw IDs unless the user needs them for a follow-up action.`;
+5. CLARITY: Keep responses concise, high-value, and conversational. Don't repeat raw technical IDs unless the user specifically asks for them.`;
 
 const llm = new ChatOpenAI({
   model: "gpt-4o-mini",
@@ -447,18 +673,36 @@ async function llmCall(state) {
 
 async function toolNode(state) {
   const lastMessage = state.messages[state.messages.length - 1];
-  const toolCall = lastMessage.tool_calls[0];
-  const toolToRun = toolsByName[toolCall.name];
-  const result = await toolToRun.invoke(toolCall.args);
-  return {
-    messages: [
-      {
-        role: "tool",
-        content: result.toString(),
-        tool_call_id: toolCall.id,
-      },
-    ],
-  };
+  const toolCalls = lastMessage.tool_calls || [];
+
+  const toolMessages = await Promise.all(
+    toolCalls.map(async (toolCall) => {
+      const toolToRun = toolsByName[toolCall.name];
+      if (!toolToRun) {
+        return {
+          role: "tool",
+          content: `Error: Tool '${toolCall.name}' not found.`,
+          tool_call_id: toolCall.id,
+        };
+      }
+      try {
+        const result = await toolToRun.invoke(toolCall.args);
+        return {
+          role: "tool",
+          content: typeof result === "string" ? result : JSON.stringify(result),
+          tool_call_id: toolCall.id,
+        };
+      } catch (err) {
+        return {
+          role: "tool",
+          content: `Error executing tool '${toolCall.name}': ${err.message}`,
+          tool_call_id: toolCall.id,
+        };
+      }
+    }),
+  );
+
+  return { messages: toolMessages };
 }
 
 function shouldContinue(state) {
